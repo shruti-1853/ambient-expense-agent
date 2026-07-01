@@ -112,21 +112,53 @@ async def get_pending_approvals():
     """
     Queries all sessions, traverses their histories, and identifies unresolved
     adk_request_input function calls. Returns session ID, interrupt ID, and expense payload.
+    Supports falling back to local SQLite session database if Vertex AI fails.
     """
     try:
-        # Retrieve all sessions belonging to the Reasoning Engine
-        list_response = await session_service.list_sessions(app_name=numeric_id)
-        sessions = list_response.sessions
+        sessions = []
+        use_sqlite = False
+        sqlite_service = None
+
+        # Try Vertex AI first, if configured and active
+        try:
+            if not AGENT_RUNTIME_ID or "projects/unknown" in AGENT_RUNTIME_ID:
+                raise Exception("Agent runtime unconfigured, skipping to SQLite fallback.")
+            list_response = await session_service.list_sessions(app_name=numeric_id)
+            sessions = list_response.sessions
+        except Exception as ve:
+            logger.info("Vertex AI Session Service failed or unconfigured. Falling back to local SQLite...")
+            db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
+            if not db_path.exists():
+                db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
+            
+            if db_path.exists():
+                logger.info(f"Using local SQLite DB path: {db_path}")
+                from google.adk.sessions.sqlite_session_service import SqliteSessionService
+                sqlite_service = SqliteSessionService(db_path=str(db_path))
+                list_response = await sqlite_service.list_sessions(app_name="expense_agent")
+                sessions = list_response.sessions
+                use_sqlite = True
+            else:
+                logger.error(f"Local SQLite database not found at: {db_path}")
+                return []
         
         pending_approvals = []
         for session in sessions:
             try:
                 # Fetch full session detail with chronological events
-                session_detail = await session_service.get_session(
-                    app_name=numeric_id,
-                    user_id=session.user_id,
-                    session_id=session.id
-                )
+                if use_sqlite and sqlite_service:
+                    session_detail = await sqlite_service.get_session(
+                        app_name="expense_agent",
+                        user_id=session.user_id,
+                        session_id=session.id
+                    )
+                else:
+                    session_detail = await session_service.get_session(
+                        app_name=numeric_id,
+                        user_id=session.user_id,
+                        session_id=session.id
+                    )
+
                 if not session_detail:
                     continue
                 
@@ -182,98 +214,140 @@ async def get_pending_approvals():
 @app.post("/api/action/{session_id}")
 async def resume_session(session_id: str, request: ActionRequest):
     """
-    Resumes a paused session on Agent Runtime.
-    Passes the response payload under the message argument to the SDK and user_id='default-user'.
+    Resumes a paused session on Agent Runtime or local uvicorn backend.
     """
     try:
-        # Load the reasoning engine client
-        remote_app = ReasoningEngine(AGENT_RUNTIME_ID)
+        use_local_run = False
         
-        # Build the exact resume payload expected by the ADK runner
-        resume_payload = {
-            "role": "user",
-            "parts": [
-                {
-                    "function_response": {
-                        "id": request.interrupt_id,
-                        "name": "adk_request_input",
-                        "response": {
-                            "approved": request.approved
+        # Try remote Vertex AI first if configured
+        try:
+            if not AGENT_RUNTIME_ID or "projects/unknown" in AGENT_RUNTIME_ID or "3854975727912878080" not in AGENT_RUNTIME_ID:
+                raise Exception("Agent runtime unconfigured, switching to local uvicorn run.")
+                
+            remote_app = ReasoningEngine(AGENT_RUNTIME_ID)
+            
+            # Build the exact resume payload expected by the ADK runner
+            resume_payload = {
+                "role": "user",
+                "parts": [
+                    {
+                        "function_response": {
+                            "id": request.interrupt_id,
+                            "name": "adk_request_input",
+                            "response": {
+                                "approved": request.approved
+                            }
                         }
                     }
-                }
-            ]
-        }
-        
-        logger.info(f"Resuming session {session_id} on engine {AGENT_RUNTIME_ID}")
-        # Run query with user_id strictly set to default-user
-        response_stream = remote_app.query(
-            message=resume_payload,
-            user_id="default-user",
-            session_id=session_id
-        )
-        
-        # Process returned chunks to extract final compliance remarks and status
+                ]
+            }
+            
+            logger.info(f"Resuming session {session_id} on engine {AGENT_RUNTIME_ID}")
+            # Run query with user_id strictly set to default-user
+            response_stream = remote_app.query(
+                message=resume_payload,
+                user_id="default-user",
+                session_id=session_id
+            )
+            events = list(response_stream)
+        except Exception as e:
+            logger.info("Vertex AI run failed or bypassed. Resuming session locally via local agent API...")
+            use_local_run = True
+
+        if use_local_run:
+            import requests
+            
+            # Find the user_id from SQLite session database
+            db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
+            if not db_path.exists():
+                db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
+                
+            user_id = "pubsub-caller"
+            if db_path.exists():
+                from google.adk.sessions.sqlite_session_service import SqliteSessionService
+                sqlite_service = SqliteSessionService(db_path=str(db_path))
+                try:
+                    # SQLite listing matches any user_id
+                    session_obj = await sqlite_service.get_session(
+                        app_name="expense_agent",
+                        user_id="",
+                        session_id=session_id
+                    )
+                    if session_obj:
+                        user_id = session_obj.user_id
+                except Exception as se:
+                    logger.error(f"Error querying SQLite for user_id: {se}")
+            
+            resume_payload = {
+                "role": "user",
+                "parts": [
+                    {
+                        "function_response": {
+                            "id": request.interrupt_id,
+                            "name": "adk_request_input",
+                            "response": {
+                                "approved": request.approved
+                            }
+                        }
+                    }
+                ]
+            }
+            
+            run_url = "http://127.0.0.1:8080/run"
+            run_payload = {
+                "appName": "expense_agent",
+                "userId": user_id,
+                "sessionId": session_id,
+                "newMessage": resume_payload
+            }
+            
+            logger.info(f"POSTing resume query to local agent: {run_url}")
+            resp = requests.post(run_url, json=run_payload)
+            resp.raise_for_status()
+            events = resp.json()
+
+        # Process returned events to extract final compliance remarks and status
         final_message = ""
         status = "approved" if request.approved else "rejected"
         
-        for chunk in response_stream:
-            if hasattr(chunk, "data") and chunk.data:
+        for chunk in events:
+            # Handle both local JSON dicts and remote chunk objects
+            evt = chunk if isinstance(chunk, dict) else {}
+            if not evt and hasattr(chunk, "data") and chunk.data:
                 try:
                     data_str = chunk.data.decode("utf-8") if isinstance(chunk.data, bytes) else str(chunk.data)
                     for line in data_str.strip().split("\n"):
-                        if not line:
-                            continue
-                        evt = json.loads(line)
-                        
-                        # Extract error conditions
-                        if evt.get("error_message") or evt.get("error_code"):
-                            final_message = evt.get("error_message") or evt.get("error_code")
-                            status = "error"
-                            
-                        # Extract structured status/message output
-                        out = evt.get("output")
-                        if out and isinstance(out, dict):
-                            if "status" in out:
-                                status = out["status"]
-                            if "message" in out:
-                                final_message = out["message"]
-                                
-                        # Fallback: extract model response text
-                        content = evt.get("content")
-                        if content and isinstance(content, dict):
-                            parts = content.get("parts")
-                            if parts and isinstance(parts, list):
-                                for p in parts:
-                                    if isinstance(p, dict) and p.get("text"):
-                                        final_message = p.get("text")
+                        if line:
+                            evt = json.loads(line)
+                            break
                 except Exception:
                     pass
-                    
-        # Fallback to fetching final session history if message wasn't caught in the stream
-        if not final_message or status == "error":
-            try:
-                history = await session_service.get_session(
-                    app_name=numeric_id,
-                    user_id="default-user",
-                    session_id=session_id
-                )
-                if history and history.events:
-                    for event in reversed(history.events):
-                        if event.output and isinstance(event.output, dict):
-                            if "status" in event.output:
-                                status = event.output["status"]
-                            if "message" in event.output:
-                                final_message = event.output["message"]
-                                break
-                        if event.content and event.content.parts:
-                            text_parts = [p.text for p in event.content.parts if p.text]
-                            if text_parts:
-                                final_message = " ".join(text_parts)
-                                break
-            except Exception as he:
-                logger.error(f"Error fetching final session events: {he}")
+            
+            if not evt:
+                continue
+
+            # Extract error conditions
+            if evt.get("error_message") or evt.get("error_code"):
+                final_message = evt.get("error_message") or evt.get("error_code")
+                status = "error"
                 
+            # Extract structured status/message output
+            out = evt.get("output")
+            if out and isinstance(out, dict):
+                if "status" in out:
+                    status = out["status"]
+                if "message" in out:
+                    final_message = out["message"]
+                    
+            # Fallback: extract model response text
+            content = evt.get("content")
+            if content and isinstance(content, dict):
+                parts = content.get("parts")
+                if parts and isinstance(parts, list):
+                    for p in parts:
+                        if isinstance(p, dict) and p.get("text"):
+                            final_message = p.get("text")
+                    
         if not final_message:
             action_word = "approved" if request.approved else "rejected"
             final_message = f"Expense has been successfully {action_word}."
@@ -287,3 +361,4 @@ async def resume_session(session_id: str, request: ActionRequest):
     except Exception as e:
         logger.exception(f"Error taking action on session {session_id}")
         raise HTTPException(status_code=500, detail=str(e))
+
