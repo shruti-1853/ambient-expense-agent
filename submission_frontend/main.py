@@ -264,17 +264,15 @@ async def resume_session(session_id: str, request: ActionRequest):
                 
             user_id = "pubsub-caller"
             if db_path.exists():
-                from google.adk.sessions.sqlite_session_service import SqliteSessionService
-                sqlite_service = SqliteSessionService(db_path=str(db_path))
+                import sqlite3
                 try:
-                    # SQLite listing matches any user_id
-                    session_obj = await sqlite_service.get_session(
-                        app_name="expense_agent",
-                        user_id="",
-                        session_id=session_id
-                    )
-                    if session_obj:
-                        user_id = session_obj.user_id
+                    with sqlite3.connect(str(db_path)) as conn:
+                        conn.row_factory = sqlite3.Row
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT user_id FROM sessions WHERE id=?", (session_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            user_id = row["user_id"]
                 except Exception as se:
                     logger.error(f"Error querying SQLite for user_id: {se}")
             
