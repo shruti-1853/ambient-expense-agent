@@ -127,9 +127,9 @@ async def get_pending_approvals():
             sessions = list_response.sessions
         except Exception as ve:
             logger.info("Vertex AI Session Service failed or unconfigured. Falling back to local SQLite...")
-            db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
+            db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
             if not db_path.exists():
-                db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
+                db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
             
             if db_path.exists():
                 logger.info(f"Using local SQLite DB path: {db_path}")
@@ -258,9 +258,9 @@ async def resume_session(session_id: str, request: ActionRequest):
             import requests
             
             # Find the user_id from SQLite session database
-            db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
+            db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
             if not db_path.exists():
-                db_path = Path(__file__).parent.parent / "ambient-expense-submission" / "ambient-expense-agent" / ".adk" / "session.db"
+                db_path = Path(__file__).parent.parent / "ambient-expense-agent" / ".adk" / "session.db"
                 
             user_id = "pubsub-caller"
             if db_path.exists():
