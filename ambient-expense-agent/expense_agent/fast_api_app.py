@@ -53,8 +53,9 @@ allow_origins = (
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# In-memory session configuration - no persistent storage
-session_service_uri = None
+session_db_path = os.path.join(AGENT_DIR, ".adk", "session.db")
+os.makedirs(os.path.dirname(session_db_path), exist_ok=True)
+session_service_uri = f"sqlite:///{session_db_path}"
 
 artifact_service_uri = f"gs://{logs_bucket_name}" if logs_bucket_name else None
 
@@ -71,8 +72,6 @@ app.title = "ambient-expense-agent"
 app.description = "API for interacting with the Agent ambient-expense-agent"
 
 # Set up shared sqlite session storage so custom endpoint runs can be tracked in the UI
-session_db_path = os.path.join(AGENT_DIR, ".adk", "session.db")
-os.makedirs(os.path.dirname(session_db_path), exist_ok=True)
 session_service = SqliteSessionService(db_path=session_db_path)
 runner = Runner(
     agent=root_agent,
