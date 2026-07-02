@@ -163,7 +163,11 @@ async def get_pending_approvals():
                     continue
                 
                 events = session_detail.events
-                for idx, event in enumerate(events):
+                pending_found = False
+                for idx in range(len(events) - 1, -1, -1):
+                    if pending_found:
+                        break
+                    event = events[idx]
                     fcs = event.get_function_calls()
                     for fc in fcs:
                         if fc.name == "adk_request_input":
@@ -201,6 +205,8 @@ async def get_pending_approvals():
                                     "amount": amount,
                                     "description": description
                                 })
+                                pending_found = True
+                                break
             except Exception as se:
                 logger.error(f"Error checking session {session.id}: {se}")
                 continue
