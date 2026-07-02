@@ -278,14 +278,15 @@ async def human_review(
 
     decision_val = ctx.resume_inputs["decision"]
     if isinstance(decision_val, dict):
-        decision_raw = (
-            decision_val.get("decision") or next(iter(decision_val.values()), "") or ""
-        )
+        raw_val = decision_val.get("decision")
+        if raw_val is None:
+            raw_val = next(iter(decision_val.values()), "")
+        decision_raw = str(raw_val)
     else:
         decision_raw = str(decision_val)
 
     decision_raw = decision_raw.strip().lower()
-    if "approve" in decision_raw:
+    if "approve" in decision_raw or "true" in decision_raw or decision_raw == "yes":
         status = "APPROVED"
         msg_out = f"✅ Expense of ${expense_amount:.2f} by {expense_submitter} approved by human reviewer."
     else:
